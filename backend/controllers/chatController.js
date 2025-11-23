@@ -1,4 +1,8 @@
-import ChatHistory from "../models/chatHistoryModel.js";
+import {
+  createChatHistory,
+  findChatHistory,
+  updateChatHistory,
+} from "../models/chatHistoryModel.js";
 import {
   semanticSearch,
   askGeminiWithMemory,
@@ -15,10 +19,10 @@ export const startSession = async (req, res) => {
   }
   try {
     const sessionId = uuidv4();
-    const newChat = new ChatHistory({ sessionId, repoUrl, history: [] });
-    await newChat.save();
+    await createChatHistory({ sessionId, repoUrl });
     res.status(201).json({ sessionId });
   } catch (error) {
+    console.error("Failed to start session:", error);
     res.status(500).json({ message: "Failed to start a new session." });
   }
 };
@@ -32,14 +36,13 @@ export const askQuestion = async (req, res) => {
   }
 
   try {
-    const chat = await ChatHistory.findOne({ sessionId });
+    const chat = await findChatHistory(sessionId);
     if (!chat) return res.status(404).json({ message: "Session not found." });
 
     const embeddingModel = genAI.getGenerativeModel({
       model: "text-embedding-004",
     });
 
-    // **FIX:** Wrap the question in the required object structure
     const queryEmbeddingResult = await embeddingModel.embedContent({
       content: { parts: [{ text: question }] },
       taskType: TaskType.RETRIEVAL_QUERY,
@@ -54,11 +57,21 @@ export const askQuestion = async (req, res) => {
 
     const answer = await askGeminiWithMemory(context, question, chat.history);
 
-    chat.history.push({ role: "user", content: question });
-    chat.history.push({ role: "model", content: answer });
-    await chat.save();
+    const updatedHistory = [
+      ...chat.history,
+      { role: "user", content: question },
+      { role: "model", content: answer },
+    ];
 
-    res.status(200).json({ answer, sources: searchResults });
+    await updateChatHistory(sessionId, updatedHistory);
+
+    const formattedResults = searchResults.map((result) => ({
+      filePath: result.filePath,
+      content: result.content,
+      score: result.score,
+    }));
+
+    res.status(200).json({ answer, sources: formattedResults });
   } catch (error) {
     console.error("Error asking question:", error);
     res.status(500).json({ message: "Error processing your question." });
