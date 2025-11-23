@@ -1,5 +1,8 @@
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
-import Document from "../models/documentModel.js";
+import {
+  deleteDocumentsByRepo,
+  insertDocuments,
+} from "../models/documentModel.js";
 import { createEmbeddings } from "../services/geminiService.js";
 import { getRepoContent } from "../services/githubService.js";
 
@@ -12,10 +15,7 @@ export const indexRepository = async (req, res) => {
   }
 
   try {
-    // 1. Fetch and filter repo content
     const docs = await getRepoContent(repoUrl);
-
-    // **FIX STARTS HERE: Filter out documents that are not strings**
     const validDocs = docs.filter((doc) => typeof doc.pageContent === "string");
 
     if (validDocs.length === 0) {
@@ -23,34 +23,36 @@ export const indexRepository = async (req, res) => {
         .status(400)
         .json({ message: "No valid text documents were found to index." });
     }
-    // **FIX ENDS HERE**
 
-    // 2. Split documents into chunks using the filtered list
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize: 1500,
       chunkOverlap: 200,
     });
-    // Use the validated 'validDocs' array here
     const chunks = await splitter.splitDocuments(validDocs);
 
-    // 3. Create embeddings for each chunk
     const contents = chunks.map((chunk) => chunk.pageContent);
     const embeddings = await createEmbeddings(contents);
 
-    // 4. Prepare documents for MongoDB
-    const documentsToStore = chunks.map((chunk, index) => ({
-      repoUrl,
-      filePath: chunk.metadata.source,
-      content: chunk.pageContent,
-      embedding: embeddings[index],
-    }));
+    const documentsToStore = chunks
+      .map((chunk, index) => {
+        const embedding = embeddings[index];
+        if (!embedding || embedding.length === 0) {
+          return null;
+        }
+        return {
+          repoUrl,
+          filePath: chunk.metadata.source,
+          content: chunk.pageContent,
+          embedding,
+        };
+      })
+      .filter(Boolean);
 
-    // 5. Clear old documents and insert new ones
-    await Document.deleteMany({ repoUrl });
-    await Document.insertMany(documentsToStore);
+    await deleteDocumentsByRepo(repoUrl);
+    await insertDocuments(documentsToStore);
 
     res.status(201).json({
-      message: `Repository indexed successfully. ${chunks.length} chunks created from ${validDocs.length} valid files.`,
+      message: `Repository indexed successfully. ${documentsToStore.length} chunks created from ${validDocs.length} valid files.`,
     });
   } catch (error) {
     console.error("Indexing error:", error.message);
